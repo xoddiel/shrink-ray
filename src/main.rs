@@ -1,7 +1,7 @@
 use std::ffi::OsStr;
 use std::io::{stdout, Write};
 use std::path::{Path, PathBuf};
-use std::process::{ExitCode, ExitStatus};
+use std::process::{ExitCode, ExitStatus, Stdio};
 
 use clap::Parser;
 use rand::Rng;
@@ -54,7 +54,7 @@ pub struct Args {
 	no_grow: bool,
 	/// Print the conversion command, but do not run it
 	#[arg(short = 'n', long)]
-	dry_run: bool
+	dry_run: bool,
 }
 
 #[tokio::main]
@@ -199,7 +199,12 @@ fn temp_file(path: impl AsRef<Path>, extension: Option<&OsStr>) -> PathBuf {
 }
 
 async fn run_tool(tool: ShrinkTool, input: impl AsRef<Path>, output: impl AsRef<Path>) -> Result<(), Error> {
-	let command = tool.command(input, output);
+	let mut command = tool.command(input, output);
+	command
+		.stdin(Stdio::null())
+		.stdout(Stdio::null())
+		.stderr(Stdio::inherit());
+
 	let status = run_command(command).await?;
 	if !status.success() {
 		return Err(Error::Conversion(tool.name(), status));
