@@ -3,7 +3,7 @@ name = "shrink-ray"
 version = "0.1.0"
 authors = ["Xoddiel d'Croy <xoddiel.dcroy@gmail.com>"]
 description = "A utility to shrink your media files"
-license = "GPL-3"
+license = "GPL-3.0-only"
 repository = "https://github.com/xoddiel/shrink-ray"
 edition = "2021"
 
