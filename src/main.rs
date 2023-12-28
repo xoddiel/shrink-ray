@@ -1,4 +1,5 @@
 use std::ffi::OsStr;
+use std::io::{stdout, Write};
 use std::path::{Path, PathBuf};
 use std::process::{ExitCode, ExitStatus};
 
@@ -51,6 +52,9 @@ pub struct Args {
 	/// Discard output file if it ended up being bigger than the input file
 	#[arg(short = 'G', long)]
 	no_grow: bool,
+	/// Print the conversion command, but do not run it
+	#[arg(short = 'n', long)]
+	dry_run: bool
 }
 
 #[tokio::main]
@@ -89,6 +93,10 @@ async fn run(args: Args) -> Result<(), Error> {
 		swap_files = true;
 		name
 	});
+
+	if args.dry_run {
+		return print_command(tool.command(args.input, output));
+	}
 
 	if let Some(mut dir) = output.parent() {
 		if dir.as_os_str().is_empty() {
@@ -147,6 +155,19 @@ async fn run(args: Args) -> Result<(), Error> {
 	}
 
 	Err(error)
+}
+
+fn print_command(command: Command) -> Result<(), Error> {
+	let command = command.as_std();
+	let mut stdout = stdout();
+	stdout.write_all(command.get_program().as_encoded_bytes())?;
+	for arg in command.get_args() {
+		write!(stdout, " ")?;
+		stdout.write_all(arg.as_encoded_bytes())?;
+	}
+	writeln!(stdout)?;
+
+	Ok(())
 }
 
 fn temp_file(path: impl AsRef<Path>, extension: Option<&OsStr>) -> PathBuf {
