@@ -4,11 +4,11 @@ use std::process::{ExitCode, ExitStatus};
 
 use clap::Parser;
 use rand::Rng;
+use size::Size;
 use tokio::process::Command;
 use tokio::{fs, io, signal};
 use tracing::{debug, error, trace};
 use tracing_subscriber::EnvFilter;
-use size::Size;
 
 use crate::shrink::{Shrink, ShrinkTool};
 
@@ -50,7 +50,7 @@ pub struct Args {
 	output: Option<PathBuf>,
 	/// Discard output file if it ended up being bigger than the input file
 	#[arg(short = 'G', long)]
-	no_grow: bool
+	no_grow: bool,
 }
 
 #[tokio::main]
@@ -83,7 +83,7 @@ async fn run(args: Args) -> Result<(), Error> {
 	let mut swap_files = false;
 	let output = args.output.unwrap_or_else(|| {
 		trace!("no output file given; choosing random temporary file");
-		let extension = tool.get_default_extension(&args.input);
+		let extension = tool.extension(&args.input);
 		let name = temp_file(&args.input, Some(AsRef::<OsStr>::as_ref(extension)));
 		debug!("chose a temporary output file `{}`", name.display());
 		swap_files = true;
@@ -101,16 +101,28 @@ async fn run(args: Args) -> Result<(), Error> {
 		}
 	}
 
-	let Err(error) = tool.shrink(&args.input, &output).await else {
+	let Err(error) = run_tool(tool, &args.input, &output).await else {
 		let input_meta = fs::metadata(&args.input).await?;
 		let output_meta = fs::metadata(&output).await?;
 
 		let input_size = input_meta.len();
 		let output_size = output_meta.len();
 		if output_size <= input_size {
-			println!("shrunk {} to {} (saved {}, -{:.2} %)", Size::from_bytes(input_size), Size::from_bytes(output_size), Size::from_bytes(input_size - output_size), 100.0 * (input_size - output_size) as f64 / input_size as f64);
+			println!(
+				"shrunk {} to {} (saved {}, -{:.2} %)",
+				Size::from_bytes(input_size),
+				Size::from_bytes(output_size),
+				Size::from_bytes(input_size - output_size),
+				100.0 * (input_size - output_size) as f64 / input_size as f64
+			);
 		} else {
-			println!("grew {} to {} (wasted {}, +{:.2} %)", Size::from_bytes(input_size), Size::from_bytes(output_size), Size::from_bytes(output_size - input_size), 100.0 * (output_size - input_size) as f64 / input_size as f64);
+			println!(
+				"grew {} to {} (wasted {}, +{:.2} %)",
+				Size::from_bytes(input_size),
+				Size::from_bytes(output_size),
+				Size::from_bytes(output_size - input_size),
+				100.0 * (output_size - input_size) as f64 / input_size as f64
+			);
 			if args.no_grow {
 				trace!("conversion grew file, removing `{}`", output.display());
 				fs::remove_file(output).await?;
@@ -163,6 +175,16 @@ fn temp_file(path: impl AsRef<Path>, extension: Option<&OsStr>) -> PathBuf {
 			return path;
 		}
 	}
+}
+
+async fn run_tool(tool: ShrinkTool, input: impl AsRef<Path>, output: impl AsRef<Path>) -> Result<(), Error> {
+	let command = tool.command(input, output);
+	let status = run_command(command).await?;
+	if !status.success() {
+		return Err(Error::Conversion(tool.name(), status));
+	}
+
+	Ok(())
 }
 
 #[cfg(target_family = "unix")]

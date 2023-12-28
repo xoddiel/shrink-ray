@@ -1,10 +1,8 @@
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 
 use tokio::process::Command;
 
 use super::Shrink;
-use crate::{run_command, Error};
 
 #[derive(Debug)]
 pub struct FFMpeg(pub(super) PathBuf);
@@ -15,11 +13,15 @@ const TAG: &str = concat!(
 );
 
 impl Shrink for FFMpeg {
-	fn get_default_extension(&self, _: impl AsRef<Path>) -> &'static str {
+	fn name(&self) -> &'static str {
+		"ffmpeg"
+	}
+
+	fn extension(&self, _: impl AsRef<Path>) -> &'static str {
 		"webm"
 	}
 
-	async fn shrink(&self, input: impl AsRef<Path>, output: impl AsRef<Path>) -> Result<(), Error> {
+	fn command(&self, input: impl AsRef<Path>, output: impl AsRef<Path>) -> Command {
 		let input = input.as_ref();
 		let output = output.as_ref();
 
@@ -43,14 +45,8 @@ impl Shrink for FFMpeg {
 				"-f",
 				"webm",
 			])
-			.arg(output)
-			.stdin(Stdio::null());
+			.arg(output);
 
-		let status = run_command(command).await?;
-		if !status.success() {
-			return Err(Error::Conversion("ffmpeg", status));
-		}
-
-		Ok(())
+		command
 	}
 }

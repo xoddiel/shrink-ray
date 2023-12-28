@@ -8,12 +8,15 @@ pub use gm::Gm;
 use infer::Type;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncReadExt;
+use tokio::process::Command;
 use tracing::{debug, trace, warn};
 
 pub trait Shrink {
-	fn get_default_extension(&self, input: impl AsRef<Path>) -> &'static str;
+	fn name(&self) -> &'static str;
 
-	async fn shrink(&self, input: impl AsRef<Path>, output: impl AsRef<Path>) -> Result<(), super::Error>;
+	fn extension(&self, input: impl AsRef<Path>) -> &'static str;
+
+	fn command(&self, input: impl AsRef<Path>, output: impl AsRef<Path>) -> Command;
 }
 
 #[derive(Debug)]
@@ -75,17 +78,24 @@ impl ShrinkTool {
 }
 
 impl Shrink for ShrinkTool {
-	fn get_default_extension(&self, input: impl AsRef<Path>) -> &'static str {
+	fn name(&self) -> &'static str {
 		match self {
-			ShrinkTool::FFMpeg(x) => x.get_default_extension(input),
-			ShrinkTool::Gm(x) => x.get_default_extension(input),
+			ShrinkTool::FFMpeg(x) => x.name(),
+			ShrinkTool::Gm(x) => x.name(),
 		}
 	}
 
-	async fn shrink(&self, input: impl AsRef<Path>, output: impl AsRef<Path>) -> Result<(), super::Error> {
+	fn extension(&self, input: impl AsRef<Path>) -> &'static str {
 		match self {
-			ShrinkTool::FFMpeg(x) => x.shrink(input, output).await,
-			ShrinkTool::Gm(x) => x.shrink(input, output).await,
+			ShrinkTool::FFMpeg(x) => x.extension(input),
+			ShrinkTool::Gm(x) => x.extension(input),
+		}
+	}
+
+	fn command(&self, input: impl AsRef<Path>, output: impl AsRef<Path>) -> Command {
+		match self {
+			ShrinkTool::FFMpeg(x) => x.command(input, output),
+			ShrinkTool::Gm(x) => x.command(input, output),
 		}
 	}
 }
