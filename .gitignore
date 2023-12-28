@@ -1,0 +1,9 @@
+# IDEs
+.idea/
+.vscode/
+
+# Temporary files
+*.swp
+
+# Artifacts
+target/
