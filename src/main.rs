@@ -8,6 +8,7 @@ use tokio::process::Command;
 use tokio::{fs, io, signal};
 use tracing::{debug, error, trace};
 use tracing_subscriber::EnvFilter;
+use size::Size;
 
 use crate::shrink::{Shrink, ShrinkTool};
 
@@ -47,6 +48,9 @@ pub struct Args {
 	input: PathBuf,
 	/// Output file (will replace input file if not given)
 	output: Option<PathBuf>,
+	/// Discard output file if it ended up being bigger than the input file
+	#[arg(short = 'G', long)]
+	no_grow: bool
 }
 
 #[tokio::main]
@@ -98,6 +102,24 @@ async fn run(args: Args) -> Result<(), Error> {
 	}
 
 	let Err(error) = tool.shrink(&args.input, &output).await else {
+		let input_meta = fs::metadata(&args.input).await?;
+		let output_meta = fs::metadata(&output).await?;
+
+		let input_size = input_meta.len();
+		let output_size = output_meta.len();
+		if output_size <= input_size {
+			println!("shrunk {} to {} (saved {}, -{:.2} %)", Size::from_bytes(input_size), Size::from_bytes(output_size), Size::from_bytes(input_size - output_size), 100.0 * (input_size - output_size) as f64 / input_size as f64);
+		} else {
+			println!("grew {} to {} (wasted {}, +{:.2} %)", Size::from_bytes(input_size), Size::from_bytes(output_size), Size::from_bytes(output_size - input_size), 100.0 * (output_size - input_size) as f64 / input_size as f64);
+			if args.no_grow {
+				trace!("conversion grew file, removing `{}`", output.display());
+				fs::remove_file(output).await?;
+				return Ok(());
+			}
+		}
+
+		filetime::set_file_mtime(&output, filetime::FileTime::from_last_modification_time(&input_meta))?;
+
 		if !swap_files {
 			return Ok(());
 		}

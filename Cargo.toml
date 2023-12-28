@@ -1,6 +1,6 @@
 [package]
 name = "shrink-ray"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Xoddiel d'Croy <xoddiel.dcroy@gmail.com>"]
 description = "A utility to shrink your media files"
 license = "GPL-3.0-only"
@@ -10,8 +10,10 @@ edition = "2021"
 [dependencies]
 clap = { version = "4.4.11", features = ["derive"] }
 derive_more = { version = "0.99.17", default-features = false, features = ["display", "error", "from"] }
+filetime = "0.2.23"
 infer = { version = "0.15.0", default-features = false }
 rand = "0.8.5"
+size = "0.4.1"
 tokio = { version = "1.35.1", features = ["io-util", "rt-multi-thread", "macros", "process", "fs", "signal"] }
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
