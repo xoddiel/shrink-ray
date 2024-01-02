@@ -24,6 +24,10 @@ pub enum Error {
 	#[error(ignore)]
 	#[from(ignore)]
 	InputNotFound(PathBuf),
+	#[display(fmt = "input file `{}` is a symlink", "_0.display()")]
+	#[error(ignore)]
+	#[from(ignore)]
+	InputIsSymlink(PathBuf),
 	#[display(fmt = "output file `{}` already exists", "_0.display()")]
 	#[error(ignore)]
 	#[from(ignore)]
@@ -87,6 +91,11 @@ async fn main() -> ExitCode {
 async fn run(args: Args) -> Result<(), Error> {
 	if !args.input.exists() {
 		return Err(Error::InputNotFound(args.input));
+	}
+
+	if args.input.is_symlink() {
+		// TODO: handle symlinks
+		return Err(Error::InputIsSymlink(args.input));
 	}
 
 	let Some(tool) = ShrinkTool::for_file(&args.input).await? else {
