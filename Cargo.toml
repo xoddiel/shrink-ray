@@ -11,7 +11,7 @@ edition = "2021"
 clap = { version = "4.4.11", features = ["derive"] }
 derive_more = { version = "0.99.17", default-features = false, features = ["display", "error", "from"] }
 filetime = "0.2.23"
-infer = { version = "0.15.0", default-features = false }
+magic = "0.16.2"
 rand = "0.8.5"
 size = "0.4.1"
 tokio = { version = "1.35.1", features = ["io-util", "rt-multi-thread", "macros", "process", "fs", "signal"] }

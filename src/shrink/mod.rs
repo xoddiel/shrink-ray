@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 
 pub use ffmpeg::FFMpeg;
 pub use gm::Gm;
-use infer::Type;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
@@ -27,11 +26,10 @@ pub enum ShrinkTool {
 
 impl ShrinkTool {
 	pub async fn for_file(input: impl AsRef<Path>) -> Result<Option<Self>, super::Error> {
-		let Some(format) = Self::get_format(input).await? else {
+		let Some(mime) = Self::get_format(input).await? else {
 			return Ok(None);
 		};
 
-		let mime = format.mime_type();
 		if mime == "image/gif" {
 			// TODO: check if GIF is single- or multi-frame
 			warn!("GIF files are currently not supported");
@@ -41,26 +39,42 @@ impl ShrinkTool {
 		} else if mime.starts_with("video/") {
 			Self::which("ffmpeg").map(|i| Some(Self::FFMpeg(FFMpeg(i))))
 		} else {
-			warn!("unsupported file format: {}", format);
+			warn!("unsupported file format: {}", mime);
 			Ok(None)
 		}
 	}
 
-	async fn get_format(path: impl AsRef<Path>) -> Result<Option<Type>, super::Error> {
+	async fn get_format(path: impl AsRef<Path>) -> Result<Option<String>, super::Error> {
+		use magic::cookie::{Cookie, DatabasePaths, Flags};
+
 		let path = path.as_ref();
 		trace!("identifying `{}`", path.display());
 
-		let mut f = OpenOptions::new().read(true).open(path).await?;
 		let mut buffer = [0; 1024];
+		let mut f = OpenOptions::new().read(true).open(path).await?;
 		let count = f.read(&mut buffer).await?;
-		let Some(format) = infer::get(&buffer[..count]) else {
-			warn!("failed to identify `{}`", path.display());
+
+		trace!("initializing libmagic");
+		let cookie = Cookie::open(Flags::MIME_TYPE | Flags::ERROR).map_err(super::Error::from_magic)?;
+
+		trace!("loading libmagic database");
+		// TODO: load databases manually using tokio
+		let cookie = cookie
+			.load(&DatabasePaths::default())
+			.map_err(super::Error::from_magic)?;
+
+		trace!("identifying {} bytes using libmagic", count);
+		let mime = cookie.buffer(&buffer[..count]).map_err(super::Error::from_magic)?;
+		debug!("libmagic returned `{}`", mime);
+
+		if !mime.contains('/') {
+			trace!("returned value does not seem to be MIME; assuming file failed to be identified");
 			return Ok(None);
-		};
+		}
 
-		debug!("identified file `{}` as `{}`", path.display(), format);
+		debug!("identified file `{}` as `{}`", path.display(), mime);
 
-		Ok(Some(format))
+		Ok(Some(mime))
 	}
 
 	fn which(name: &'static str) -> Result<PathBuf, super::Error> {

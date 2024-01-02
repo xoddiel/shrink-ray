@@ -36,10 +36,19 @@ pub enum Error {
 	#[error(ignore)]
 	#[from(ignore)]
 	Conversion(&'static str, ExitStatus),
+	#[error(ignore)]
+	#[from(ignore)]
+	Magic(String),
 	Io(io::Error),
 	Which(which::Error),
 	#[cfg(target_family = "unix")]
 	Nix(nix::errno::Errno),
+}
+
+impl Error {
+	pub(crate) fn from_magic(error: impl std::error::Error) -> Self {
+		Self::Magic(error.to_string())
+	}
 }
 
 #[derive(Debug, Parser)]
