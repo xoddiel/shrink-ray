@@ -3,8 +3,7 @@ use std::io::{stdout, Write};
 use std::path::{Path, PathBuf};
 use std::process::{ExitCode, ExitStatus, Stdio};
 
-use clap::Parser;
-use rand::Rng;
+use clap::{CommandFactory, Parser};
 use size::Size;
 use tokio::process::Command;
 use tokio::{fs, io, signal};
@@ -14,6 +13,7 @@ use tracing_subscriber::EnvFilter;
 use crate::shrink::{Shrink, ShrinkTool};
 
 mod shrink;
+mod temp;
 
 #[macro_use]
 extern crate derive_more;
@@ -58,16 +58,67 @@ impl Error {
 #[derive(Debug, Parser)]
 #[command(author, version, about)]
 pub struct Args {
-	/// Input file to convert
-	input: PathBuf,
-	/// Output file (will replace input file if not given)
-	output: Option<PathBuf>,
+	/// Files to convert
+	#[arg(required = true)]
+	inputs: Vec<PathBuf>,
+	/// Output options
+	#[command(flatten)]
+	output: Output,
 	/// Discard output file if it ended up being bigger than the input file
 	#[arg(short = 'G', long)]
 	no_grow: bool,
 	/// Print the conversion command, but do not run it
 	#[arg(short = 'n', long)]
 	dry_run: bool,
+}
+
+#[derive(Debug, clap::Args)]
+#[group(required = false, multiple = false)]
+struct Output {
+	/// Output file
+	#[arg(short = 'o', long = "output-file", value_name = "PATH")]
+	file: Option<PathBuf>,
+	/// Output file without extension
+	#[arg(short, long = "output-prefix", value_name = "PATH")]
+	prefix: Option<PathBuf>,
+	/// Output directory
+	#[arg(short, long = "output-dir", value_name = "PATH")]
+	dir: Option<PathBuf>,
+}
+
+impl Output {
+	pub fn should_replace(&self) -> bool {
+		matches!(
+			self,
+			Output {
+				file: None,
+				prefix: None,
+				dir: None
+			}
+		)
+	}
+
+	pub fn get(&self, input: impl AsRef<Path>, extension: impl AsRef<OsStr>) -> PathBuf {
+		if let Some(file) = &self.file {
+			return file.clone();
+		}
+
+		if let Some(prefix) = &self.prefix {
+			let mut prefix = prefix.clone().into_os_string();
+			prefix.push(".");
+			prefix.push(extension);
+			return prefix.into();
+		}
+
+		if let Some(dir) = &self.dir {
+			return dir.join(input.as_ref().file_name().unwrap()).with_extension(extension);
+		}
+
+		trace!("no output file given; choosing random temporary file");
+		let name = temp::file(&input, Some(extension.as_ref()));
+		debug!("chose a temporary output file `{}`", name.display());
+		name
+	}
 }
 
 #[tokio::main]
@@ -77,6 +128,24 @@ async fn main() -> ExitCode {
 		.init();
 
 	let args = Args::parse();
+	if args.inputs.len() > 1 {
+		if args.output.file.is_some() {
+			Args::command()
+				.error(
+					clap::error::ErrorKind::ArgumentConflict,
+					"the argument '--output-file <PATH>' cannot be used with multiple inputs",
+				)
+				.exit();
+		} else if args.output.prefix.is_some() {
+			Args::command()
+				.error(
+					clap::error::ErrorKind::ArgumentConflict,
+					"the argument '--output-prefix <PATH>' cannot be used with multiple inputs",
+				)
+				.exit();
+		}
+	}
+
 	debug!("arguments: {:?}", args);
 
 	match run(args).await {
@@ -89,31 +158,32 @@ async fn main() -> ExitCode {
 }
 
 async fn run(args: Args) -> Result<(), Error> {
-	if !args.input.exists() {
-		return Err(Error::InputNotFound(args.input));
+	for input in &args.inputs {
+		run_input(input, &args).await?;
 	}
 
-	if args.input.is_symlink() {
+	Ok(())
+}
+
+async fn run_input(input: impl AsRef<Path>, args: &Args) -> Result<(), Error> {
+	let input = input.as_ref();
+	if !input.exists() {
+		return Err(Error::InputNotFound(input.to_path_buf()));
+	}
+
+	if input.is_symlink() {
 		// TODO: handle symlinks
-		return Err(Error::InputIsSymlink(args.input));
+		return Err(Error::InputIsSymlink(input.to_path_buf()));
 	}
 
-	let Some(tool) = ShrinkTool::for_file(&args.input).await? else {
+	let Some(tool) = ShrinkTool::for_file(input).await? else {
 		return Ok(());
 	};
 
-	let mut swap_files = false;
-	let output = args.output.unwrap_or_else(|| {
-		trace!("no output file given; choosing random temporary file");
-		let extension = tool.extension(&args.input);
-		let name = temp_file(&args.input, Some(AsRef::<OsStr>::as_ref(extension)));
-		debug!("chose a temporary output file `{}`", name.display());
-		swap_files = true;
-		name
-	});
+	let output = args.output.get(input, tool.extension(input));
 
 	if args.dry_run {
-		return print_command(tool.command(args.input, output));
+		return print_command(tool.command(input, output));
 	}
 
 	if let Some(mut dir) = output.parent() {
@@ -127,52 +197,18 @@ async fn run(args: Args) -> Result<(), Error> {
 		}
 	}
 
-	let Err(error) = run_tool(tool, &args.input, &output).await else {
-		let input_meta = fs::metadata(&args.input).await?;
-		let output_meta = fs::metadata(&output).await?;
-
-		let input_size = input_meta.len();
-		let output_size = output_meta.len();
-		if output_size <= input_size {
-			println!(
-				"shrunk {} to {} (saved {}, -{:.2} %)",
-				Size::from_bytes(input_size),
-				Size::from_bytes(output_size),
-				Size::from_bytes(input_size - output_size),
-				100.0 * (input_size - output_size) as f64 / input_size as f64
-			);
-		} else {
-			println!(
-				"grew {} to {} (wasted {}, +{:.2} %)",
-				Size::from_bytes(input_size),
-				Size::from_bytes(output_size),
-				Size::from_bytes(output_size - input_size),
-				100.0 * (output_size - input_size) as f64 / input_size as f64
-			);
-			if args.no_grow {
-				trace!("conversion grew file, removing `{}`", output.display());
-				fs::remove_file(output).await?;
-				return Ok(());
-			}
-		}
-
-		filetime::set_file_mtime(&output, filetime::FileTime::from_last_modification_time(&input_meta))?;
-
-		if !swap_files {
-			return Ok(());
-		}
-
-		return replace(args.input, output).await;
-	};
-
-	if output.is_file() {
-		trace!("conversion failed, removing `{}`", output.display());
-		if let Err(error) = fs::remove_file(output).await {
-			error!("failed to remove output file: {}", error);
-		}
+	let shrunk = run_tool(tool, input, &output).await?;
+	if args.no_grow && !shrunk {
+		trace!("conversion grew file, removing `{}`", output.display());
+		fs::remove_file(output).await?;
+		return Ok(());
 	}
 
-	Err(error)
+	if !args.output.should_replace() {
+		return Ok(());
+	}
+
+	replace(input, output).await
 }
 
 fn print_command(command: Command) -> Result<(), Error> {
@@ -188,42 +224,58 @@ fn print_command(command: Command) -> Result<(), Error> {
 	Ok(())
 }
 
-fn temp_file(path: impl AsRef<Path>, extension: Option<&OsStr>) -> PathBuf {
-	const CHARS: &str = "abcdefghijklmnopqrstuvwxyz0123456789";
-	const LENGTH: usize = 4;
-
-	let path = path.as_ref();
-	let mut rng = rand::thread_rng();
-	let mut prefix = path.parent().unwrap().join(path.file_stem().unwrap()).into_os_string();
-	prefix.push("-");
-	loop {
-		let mut buf = prefix.clone();
-
-		for _ in 0..LENGTH {
-			let index = rng.gen_range(0..CHARS.len());
-			buf.push(&CHARS[index..=index]);
+async fn run_tool(tool: ShrinkTool, input: impl AsRef<Path>, output: impl AsRef<Path>) -> Result<bool, Error> {
+	let input = input.as_ref();
+	let output = output.as_ref();
+	if let Err(error) = execute_tool(tool, input, output).await {
+		if output.is_file() {
+			trace!("conversion failed, removing `{}`", output.display());
+			if let Err(error) = fs::remove_file(output).await {
+				error!("failed to remove output file: {}", error);
+			}
 		}
 
-		if let Some(extension) = extension {
-			buf.push(".");
-			buf.push(extension);
-		}
-
-		let path = PathBuf::from(buf);
-		if !path.exists() {
-			return path;
-		}
+		return Err(error);
 	}
+
+	let input_meta = fs::metadata(input).await?;
+	let output_meta = fs::metadata(output).await?;
+
+	let input_size = input_meta.len();
+	let output_size = output_meta.len();
+	if output_size <= input_size {
+		println!(
+			"{}: shrunk {} to {} (saved {}, -{:.2} %)",
+			input.display(),
+			Size::from_bytes(input_size),
+			Size::from_bytes(output_size),
+			Size::from_bytes(input_size - output_size),
+			100.0 * (input_size - output_size) as f64 / input_size as f64
+		);
+	} else {
+		println!(
+			"{}: grew {} to {} (wasted {}, +{:.2} %)",
+			input.display(),
+			Size::from_bytes(input_size),
+			Size::from_bytes(output_size),
+			Size::from_bytes(output_size - input_size),
+			100.0 * (output_size - input_size) as f64 / input_size as f64
+		);
+	}
+
+	filetime::set_file_mtime(output, filetime::FileTime::from_last_modification_time(&input_meta))?;
+
+	Ok(input_size >= output_size)
 }
 
-async fn run_tool(tool: ShrinkTool, input: impl AsRef<Path>, output: impl AsRef<Path>) -> Result<(), Error> {
+async fn execute_tool(tool: ShrinkTool, input: impl AsRef<Path>, output: impl AsRef<Path>) -> Result<(), Error> {
 	let mut command = tool.command(input, output);
 	command
 		.stdin(Stdio::null())
 		.stdout(Stdio::null())
 		.stderr(Stdio::inherit());
 
-	let status = run_command(command).await?;
+	let status = execute_command(command).await?;
 	if !status.success() {
 		return Err(Error::Conversion(tool.name(), status));
 	}
@@ -232,7 +284,7 @@ async fn run_tool(tool: ShrinkTool, input: impl AsRef<Path>, output: impl AsRef<
 }
 
 #[cfg(target_family = "unix")]
-async fn run_command(mut command: Command) -> Result<ExitStatus, Error> {
+async fn execute_command(mut command: Command) -> Result<ExitStatus, Error> {
 	use nix::sys::signal::{kill, Signal};
 	use nix::unistd::Pid;
 
@@ -280,7 +332,7 @@ async fn replace(input: impl AsRef<Path>, output: impl AsRef<Path>) -> Result<()
 		return Err(Error::OutputExists(destination));
 	}
 
-	let temp = temp_file(input, input.extension());
+	let temp = temp::file(input, input.extension());
 	trace!("renaming original file `{}` to `{}`", input.display(), temp.display());
 	fs::rename(input, &temp).await?;
 
