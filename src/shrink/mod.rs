@@ -26,6 +26,8 @@ pub enum ShrinkTool {
 
 impl ShrinkTool {
 	pub async fn for_file(input: impl AsRef<Path>) -> Result<Option<Self>, super::Error> {
+		// TODO: cache and reuse binary paths and libmagic cookie
+
 		let Some(mime) = Self::get_format(input).await? else {
 			return Ok(None);
 		};
@@ -78,6 +80,8 @@ impl ShrinkTool {
 	}
 
 	fn which(name: &'static str) -> Result<PathBuf, super::Error> {
+		// TODO: check environment variables (`SHRINKRAY_<NAME>`)
+
 		trace!("looking for `{}` binary", name);
 		match which::which(name) {
 			Ok(x) => {

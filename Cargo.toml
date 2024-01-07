@@ -7,6 +7,8 @@ license = "GPL-3.0-only"
 repository = "https://github.com/xoddiel/shrink-ray"
 edition = "2021"
 
+# TODO: add a README file
+
 [dependencies]
 clap = { version = "4.4.11", features = ["derive"] }
 derive_more = { version = "0.99.17", default-features = false, features = ["display", "error", "from"] }

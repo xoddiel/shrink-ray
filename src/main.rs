@@ -204,6 +204,8 @@ async fn run_input(input: impl AsRef<Path>, args: &Args) -> Result<(), Error> {
 		return Ok(());
 	}
 
+	// TODO: rotate files when output is explicitly given, but it coincides with
+	// input
 	if !args.output.should_replace() {
 		return Ok(());
 	}
@@ -282,6 +284,8 @@ async fn execute_tool(tool: ShrinkTool, input: impl AsRef<Path>, output: impl As
 
 	Ok(())
 }
+
+// TODO: add support for Windows as well
 
 #[cfg(target_family = "unix")]
 async fn execute_command(mut command: Command) -> Result<ExitStatus, Error> {
