@@ -16,37 +16,29 @@ mod shrink;
 mod temp;
 
 #[macro_use]
-extern crate derive_more;
+extern crate thiserror;
 
-#[derive(Debug, Display, Error, From)]
+#[derive(Debug, Error)]
 pub enum Error {
-	#[display(fmt = "input file `{}` not found", "_0.display()")]
-	#[error(ignore)]
-	#[from(ignore)]
+	#[error("input file `{}` not found", .0.display())]
 	InputNotFound(PathBuf),
-	#[display(fmt = "input file `{}` is a symlink", "_0.display()")]
-	#[error(ignore)]
-	#[from(ignore)]
+	#[error("input file `{}` is a symlink", .0.display())]
 	InputIsSymlink(PathBuf),
-	#[display(fmt = "output file `{}` already exists", "_0.display()")]
-	#[error(ignore)]
-	#[from(ignore)]
+	#[error("output file `{}` already exists", .0.display())]
 	OutputExists(PathBuf),
-	#[display(fmt = "tool `{}` not found", _0)]
-	#[error(ignore)]
-	#[from(ignore)]
+	#[error("tool `{}` not found", .0)]
 	ToolNotFound(&'static str),
-	#[display(fmt = "{} invocation failed, {}", _0, _1)]
-	#[error(ignore)]
-	#[from(ignore)]
+	#[error("{} invocation failed, {}", .0, .1)]
 	Conversion(&'static str, ExitStatus),
-	#[error(ignore)]
-	#[from(ignore)]
+	#[error("{}", .0)]
 	Magic(String),
-	Io(io::Error),
-	Which(which::Error),
+	#[error(transparent)]
+	Io(#[from] io::Error),
+	#[error(transparent)]
+	Which(#[from] which::Error),
 	#[cfg(target_family = "unix")]
-	Nix(nix::errno::Errno),
+	#[error(transparent)]
+	Nix(#[from] nix::errno::Errno),
 }
 
 impl Error {
