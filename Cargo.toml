@@ -11,12 +11,13 @@ edition = "2021"
 
 [dependencies]
 clap = { version = "4.4.11", features = ["derive"] }
+crossterm = "0.27.0"
 filetime = "0.2.23"
 magic = "0.16.2"
 rand = "0.8.5"
 size = "0.4.1"
 thiserror = "1.0.61"
-tokio = { version = "1.35.1", features = ["io-util", "rt-multi-thread", "macros", "process", "fs", "signal"] }
+tokio = { version = "1.35.1", features = ["io-util", "rt-multi-thread", "macros", "process", "fs", "signal", "time"] }
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 which = "6.0.1"

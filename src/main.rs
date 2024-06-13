@@ -2,11 +2,15 @@ use std::ffi::OsStr;
 use std::io::{stdout, Write};
 use std::path::{Path, PathBuf};
 use std::process::{ExitCode, ExitStatus, Stdio};
+use std::time::Duration;
 
 use clap::{CommandFactory, Parser};
+use crossterm::style::Stylize;
+use crossterm::{cursor, terminal};
 use size::Size;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
-use tokio::{fs, io, signal};
+use tokio::{fs, io, signal, time};
 use tracing::{debug, error, trace};
 use tracing_subscriber::EnvFilter;
 
@@ -140,21 +144,23 @@ async fn main() -> ExitCode {
 
 	debug!("arguments: {:?}", args);
 
-	match run(args).await {
-		Ok(_) => ExitCode::SUCCESS,
-		Err(x) => {
-			eprintln!("{}", x);
-			ExitCode::FAILURE
+	for input in &args.inputs {
+		match run_input(input, &args).await {
+			Ok(_) => {}
+			Err(Error::Conversion(_, status)) => {
+				// TODO: extract prints into their own functions/module?
+				let status = format!("({})", status);
+				println!("      {} {} {}", "Failed".red().bold(), input.display(), status.dim());
+				return ExitCode::FAILURE;
+			}
+			Err(x) => {
+				eprintln!("{}", x);
+				return ExitCode::FAILURE;
+			}
 		}
 	}
-}
 
-async fn run(args: Args) -> Result<(), Error> {
-	for input in &args.inputs {
-		run_input(input, &args).await?;
-	}
-
-	Ok(())
+	ExitCode::SUCCESS
 }
 
 async fn run_input(input: impl AsRef<Path>, args: &Args) -> Result<(), Error> {
@@ -238,22 +244,23 @@ async fn run_tool(tool: ShrinkTool, input: impl AsRef<Path>, output: impl AsRef<
 	let input_size = input_meta.len();
 	let output_size = output_meta.len();
 	if output_size <= input_size {
-		println!(
-			"{}: shrunk {} to {} (saved {}, -{:.2} %)",
-			input.display(),
-			Size::from_bytes(input_size),
-			Size::from_bytes(output_size),
+		let stats = format!(
+			"(-{}, -{:.2} %)",
 			Size::from_bytes(input_size - output_size),
 			100.0 * (input_size - output_size) as f64 / input_size as f64
 		);
+		println!("      {} {} {}", "Shrunk".green().bold(), input.display(), stats.dim());
 	} else {
-		println!(
-			"{}: grew {} to {} (wasted {}, +{:.2} %)",
-			input.display(),
-			Size::from_bytes(input_size),
-			Size::from_bytes(output_size),
+		let stats = format!(
+			"(+{}, +{:.2} %)",
 			Size::from_bytes(output_size - input_size),
 			100.0 * (output_size - input_size) as f64 / input_size as f64
+		);
+		println!(
+			"        {} {} {}",
+			"Grew".dark_yellow().bold(),
+			input.display(),
+			stats.dim()
 		);
 	}
 
@@ -263,13 +270,14 @@ async fn run_tool(tool: ShrinkTool, input: impl AsRef<Path>, output: impl AsRef<
 }
 
 async fn execute_tool(tool: ShrinkTool, input: impl AsRef<Path>, output: impl AsRef<Path>) -> Result<(), Error> {
+	let input = input.as_ref();
 	let mut command = tool.command(input, output);
 	command
 		.stdin(Stdio::null())
 		.stdout(Stdio::null())
-		.stderr(Stdio::inherit());
+		.stderr(Stdio::piped());
 
-	let status = execute_command(command).await?;
+	let status = execute_command(command, input).await?;
 	if !status.success() {
 		return Err(Error::Conversion(tool.name(), status));
 	}
@@ -280,25 +288,64 @@ async fn execute_tool(tool: ShrinkTool, input: impl AsRef<Path>, output: impl As
 // TODO: add support for Windows as well
 
 #[cfg(target_family = "unix")]
-async fn execute_command(mut command: Command) -> Result<ExitStatus, Error> {
+async fn execute_command(mut command: Command, input: &Path) -> Result<ExitStatus, Error> {
 	use nix::sys::signal::{kill, Signal};
 	use nix::unistd::Pid;
+
+	const ANIMATION: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 	debug!("spawning {:?}", command);
 	let mut child = command.spawn()?;
 	debug!("spawned {:?}", child);
+
+	let mut err = BufReader::new(child.stderr.take().unwrap());
+	let mut err_buffer = Vec::new();
+
+	let mut out = stdout().lock();
+	let mut progress = 0;
+	let mut cancel = false;
+	let _ = write!(
+		out,
+		"   {} {} {}",
+		"Shrinking".cyan().bold(),
+		ANIMATION[progress],
+		input.display()
+	);
+	let _ = out.flush();
 
 	loop {
 		tokio::select! {
 			status = child.wait() => {
 				let status = status?;
 				debug!("child process {}", status);
+				let _ = write!(out, "{}{}", cursor::MoveToColumn(0), terminal::Clear(terminal::ClearType::CurrentLine));
+				let _ = out.flush();
 				return Ok(status);
+			},
+
+			_ = time::sleep(Duration::from_millis(200)) => {
+				progress = (progress + 1) % ANIMATION.len();
+				let _ = write!(out, "{}{}", cursor::MoveToColumn(0), terminal::Clear(terminal::ClearType::UntilNewLine));
+				let _ = if !cancel {
+					write!(out, "   {} {} {}", "Shrinking".cyan().bold(), ANIMATION[progress], input.display())
+				} else {
+					write!(out, "  {} {} {}", "Cancelling".red().bold(), ANIMATION[progress], input.display())
+				};
+				let _ = out.flush();
+			},
+
+			result = err.read_until(b'\n', &mut err_buffer) => {
+				let _ = result?;
+				let _ = write!(out, "{}{}", cursor::MoveToColumn(0), terminal::Clear(terminal::ClearType::UntilNewLine));
+				let _ = out.write_all(err_buffer.as_ref());
+				let _ = out.flush();
+				err_buffer.clear();
 			},
 
 			_ = signal::ctrl_c() => {
 				trace!("forwarding SIGINT");
 				if let Some(id) = child.id() {
+					cancel = true;
 					let Err(errno) = kill(Pid::from_raw(id as i32), Signal::SIGINT) else {
 						continue;
 					};
@@ -306,6 +353,8 @@ async fn execute_command(mut command: Command) -> Result<ExitStatus, Error> {
 					if errno == nix::errno::Errno::ESRCH {
 						continue;
 					} else {
+						let _ = write!(out, "{}{}", cursor::MoveToColumn(0), terminal::Clear(terminal::ClearType::CurrentLine));
+						let _ = out.flush();
 						return Err(Error::from(errno));
 					}
 				}
