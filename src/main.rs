@@ -1,121 +1,29 @@
-use std::ffi::OsStr;
 use std::io::{stdout, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{ExitCode, ExitStatus, Stdio};
 use std::time::Duration;
 
 use clap::{CommandFactory, Parser};
 use crossterm::style::Stylize;
 use crossterm::{cursor, terminal};
-use size::Size;
+use delta::Delta;
+use error::Error;
+use options::Options;
+use shrink::{Shrink, ShrinkTool};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
-use tokio::{fs, io, signal, time};
+use tokio::{fs, signal, time};
 use tracing::{debug, error, trace};
 use tracing_subscriber::EnvFilter;
 
-use crate::shrink::{Shrink, ShrinkTool};
-
+mod delta;
+mod error;
+mod options;
 mod shrink;
 mod temp;
 
 #[macro_use]
 extern crate thiserror;
-
-#[derive(Debug, Error)]
-pub enum Error {
-	#[error("input file `{}` not found", .0.display())]
-	InputNotFound(PathBuf),
-	#[error("input file `{}` is a symlink", .0.display())]
-	InputIsSymlink(PathBuf),
-	#[error("output file `{}` already exists", .0.display())]
-	OutputExists(PathBuf),
-	#[error("tool `{}` not found", .0)]
-	ToolNotFound(&'static str),
-	#[error("{} invocation failed, {}", .0, .1)]
-	Conversion(&'static str, ExitStatus),
-	#[error("{}", .0)]
-	Magic(String),
-	#[error(transparent)]
-	Io(#[from] io::Error),
-	#[error(transparent)]
-	Which(#[from] which::Error),
-	#[cfg(target_family = "unix")]
-	#[error(transparent)]
-	Nix(#[from] nix::errno::Errno),
-}
-
-impl Error {
-	pub(crate) fn from_magic(error: impl std::error::Error) -> Self {
-		Self::Magic(error.to_string())
-	}
-}
-
-#[derive(Debug, Parser)]
-#[command(author, version, about)]
-pub struct Args {
-	/// Files to convert
-	#[arg(required = true)]
-	inputs: Vec<PathBuf>,
-	/// Output options
-	#[command(flatten)]
-	output: Output,
-	/// Discard output file if it ended up being bigger than the input file
-	#[arg(short = 'G', long)]
-	no_grow: bool,
-	/// Print the conversion command, but do not run it
-	#[arg(short = 'n', long)]
-	dry_run: bool,
-}
-
-#[derive(Debug, clap::Args)]
-#[group(required = false, multiple = false)]
-struct Output {
-	/// Output file
-	#[arg(short = 'o', long = "output-file", value_name = "PATH")]
-	file: Option<PathBuf>,
-	/// Output file without extension
-	#[arg(short, long = "output-prefix", value_name = "PATH")]
-	prefix: Option<PathBuf>,
-	/// Output directory
-	#[arg(short, long = "output-dir", value_name = "PATH")]
-	dir: Option<PathBuf>,
-}
-
-impl Output {
-	pub fn should_replace(&self) -> bool {
-		matches!(
-			self,
-			Output {
-				file: None,
-				prefix: None,
-				dir: None
-			}
-		)
-	}
-
-	pub fn get(&self, input: impl AsRef<Path>, extension: impl AsRef<OsStr>) -> PathBuf {
-		if let Some(file) = &self.file {
-			return file.clone();
-		}
-
-		if let Some(prefix) = &self.prefix {
-			let mut prefix = prefix.clone().into_os_string();
-			prefix.push(".");
-			prefix.push(extension);
-			return prefix.into();
-		}
-
-		if let Some(dir) = &self.dir {
-			return dir.join(input.as_ref().file_name().unwrap()).with_extension(extension);
-		}
-
-		trace!("no output file given; choosing random temporary file");
-		let name = temp::file(&input, Some(extension.as_ref()));
-		debug!("chose a temporary output file `{}`", name.display());
-		name
-	}
-}
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -123,17 +31,17 @@ async fn main() -> ExitCode {
 		.with_env_filter(EnvFilter::from_default_env())
 		.init();
 
-	let args = Args::parse();
-	if args.inputs.len() > 1 {
-		if args.output.file.is_some() {
-			Args::command()
+	let options = Options::parse();
+	if options.inputs.len() > 1 {
+		if options.output.file.is_some() {
+			Options::command()
 				.error(
 					clap::error::ErrorKind::ArgumentConflict,
 					"the argument '--output-file <PATH>' cannot be used with multiple inputs",
 				)
 				.exit();
-		} else if args.output.prefix.is_some() {
-			Args::command()
+		} else if options.output.prefix.is_some() {
+			Options::command()
 				.error(
 					clap::error::ErrorKind::ArgumentConflict,
 					"the argument '--output-prefix <PATH>' cannot be used with multiple inputs",
@@ -142,10 +50,10 @@ async fn main() -> ExitCode {
 		}
 	}
 
-	debug!("arguments: {:?}", args);
+	debug!("arguments: {:?}", options);
 
-	for input in &args.inputs {
-		match run_input(input, &args).await {
+	for input in &options.inputs {
+		match run_input(input, &options).await {
 			Ok(_) => {}
 			Err(Error::Conversion(_, status)) => {
 				// TODO: extract prints into their own functions/module?
@@ -163,7 +71,7 @@ async fn main() -> ExitCode {
 	ExitCode::SUCCESS
 }
 
-async fn run_input(input: impl AsRef<Path>, args: &Args) -> Result<(), Error> {
+async fn run_input(input: impl AsRef<Path>, args: &Options) -> Result<(), Error> {
 	let input = input.as_ref();
 	if !input.exists() {
 		return Err(Error::InputNotFound(input.to_path_buf()));
@@ -195,8 +103,21 @@ async fn run_input(input: impl AsRef<Path>, args: &Args) -> Result<(), Error> {
 		}
 	}
 
-	let shrunk = run_tool(tool, input, &output).await?;
-	if args.no_grow && !shrunk {
+	let delta = run_tool(tool, input, &output).await?;
+	if delta.is_smaller() {
+		let stats = format!("(-{}, -{:.2} %)", delta.size_difference(), 100.0 * delta.ratio());
+		println!("      {} {} {}", "Shrunk".green().bold(), input.display(), stats.dim());
+	} else {
+		let stats = format!("(+{}, +{:.2} %)", delta.size_difference(), 100.0 * delta.ratio());
+		println!(
+			"        {} {} {}",
+			"Grew".dark_yellow().bold(),
+			input.display(),
+			stats.dim()
+		);
+	}
+
+	if args.no_grow && !delta.is_smaller() {
 		trace!("conversion grew file, removing `{}`", output.display());
 		fs::remove_file(output).await?;
 		return Ok(());
@@ -224,7 +145,7 @@ fn print_command(command: Command) -> Result<(), Error> {
 	Ok(())
 }
 
-async fn run_tool(tool: ShrinkTool, input: impl AsRef<Path>, output: impl AsRef<Path>) -> Result<bool, Error> {
+async fn run_tool(tool: ShrinkTool, input: impl AsRef<Path>, output: impl AsRef<Path>) -> Result<Delta, Error> {
 	let input = input.as_ref();
 	let output = output.as_ref();
 	if let Err(error) = execute_tool(tool, input, output).await {
@@ -243,30 +164,9 @@ async fn run_tool(tool: ShrinkTool, input: impl AsRef<Path>, output: impl AsRef<
 
 	let input_size = input_meta.len();
 	let output_size = output_meta.len();
-	if output_size <= input_size {
-		let stats = format!(
-			"(-{}, -{:.2} %)",
-			Size::from_bytes(input_size - output_size),
-			100.0 * (input_size - output_size) as f64 / input_size as f64
-		);
-		println!("      {} {} {}", "Shrunk".green().bold(), input.display(), stats.dim());
-	} else {
-		let stats = format!(
-			"(+{}, +{:.2} %)",
-			Size::from_bytes(output_size - input_size),
-			100.0 * (output_size - input_size) as f64 / input_size as f64
-		);
-		println!(
-			"        {} {} {}",
-			"Grew".dark_yellow().bold(),
-			input.display(),
-			stats.dim()
-		);
-	}
-
 	filetime::set_file_mtime(output, filetime::FileTime::from_last_modification_time(&input_meta))?;
 
-	Ok(input_size >= output_size)
+	Ok(Delta::new(input_size, output_size))
 }
 
 async fn execute_tool(tool: ShrinkTool, input: impl AsRef<Path>, output: impl AsRef<Path>) -> Result<(), Error> {
