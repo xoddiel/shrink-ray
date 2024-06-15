@@ -1,26 +1,26 @@
-use std::io::{stdout, Write};
 use std::path::Path;
 use std::process::{ExitCode, ExitStatus, Stdio};
 use std::time::Duration;
 
 use clap::{CommandFactory, Parser};
-use crossterm::style::Stylize;
-use crossterm::{cursor, terminal};
-use delta::Delta;
 use error::Error;
 use options::Options;
 use shrink::{Shrink, ShrinkTool};
-use size::Size;
+use stats::Delta;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::{fs, signal, time};
 use tracing::{debug, error, trace};
 use tracing_subscriber::EnvFilter;
 
-mod delta;
+use crate::output::Output;
+use crate::stats::Statistics;
+
 mod error;
 mod options;
+mod output;
 mod shrink;
+mod stats;
 mod temp;
 
 #[macro_use]
@@ -45,48 +45,25 @@ async fn main() -> ExitCode {
 	debug!("arguments: {:?}", options);
 	// TODO: bring back --dry-run
 
-	let mut processed = 0;
-	let mut saved = 0;
-	let mut wasted = 0;
-	let mut shrunk = 0;
-	let mut grew = 0;
-	let mut skipped = 0;
-	let mut failed = 0;
+	let mut output = Output::new();
+	let mut stats = Statistics::default();
 	for input in &options.inputs {
-		match run_input(input, &options).await {
+		match run_input(input, &options, &mut output).await {
 			Ok(delta) if delta.is_smaller() => {
-				let stats = format!("(-{}, -{:.2} %)", delta.size_difference(), 100.0 * delta.ratio());
-				println!("      {} {} {}", "Shrunk".green().bold(), input.display(), stats.dim());
-				processed += delta.original;
-				saved += delta.difference();
-				shrunk += 1;
+				output.write_shrink(input, delta);
+				stats.shrink(delta);
 			}
 			Ok(delta) => {
-				let stats = format!("(+{}, +{:.2} %)", delta.size_difference(), 100.0 * delta.ratio());
-				println!(
-					"        {} {} {}",
-					"Grew".dark_yellow().bold(),
-					input.display(),
-					stats.dim()
-				);
-				processed += delta.original;
-				wasted += delta.difference();
-				grew += 1;
+				output.write_grow(input, delta);
+				stats.grow(delta);
 			}
 			Err(Error::InputFormatUnknown(_)) => {
-				println!(
-					"     {} {} {}",
-					"Skipped".magenta().bold(),
-					input.display(),
-					"(unknown file format)".dim()
-				);
-				skipped += 1;
+				output.write_skip(input, "unknown file format");
+				stats.skip();
 			}
 			Err(Error::Conversion(_, status)) => {
-				// TODO: extract prints into their own functions/module?
-				let status = format!("({})", status);
-				println!("      {} {} {}", "Failed".red().bold(), input.display(), status.dim());
-				failed += 1;
+				output.write_fail(input, status);
+				stats.fail();
 
 				if !options.keep_going {
 					break;
@@ -101,68 +78,34 @@ async fn main() -> ExitCode {
 
 	if options.stats {
 		println!();
-		print!(
-			"{} {} {}, ",
-			"Shrunk".green().bold(),
-			shrunk,
-			format!("(-{})", Size::from_bytes(saved)).dim()
-		);
-		print!(
-			"{} {} {}, ",
-			"Grew".dark_yellow().bold(),
-			grew,
-			format!("(+{})", Size::from_bytes(wasted)).dim()
-		);
-		print!("{} {}, ", "Skipped".magenta().bold(), skipped);
-		println!("{} {} ", "Failed".red().bold(), failed);
-
-		let delta = Delta::new(processed, processed - saved + wasted);
-		print!("Processed {}, ", delta.original_size());
-		if saved > wasted {
-			let ratio = format!("(-{:.2} %)", delta.ratio());
-			println!(
-				"{} -{} {}",
-				"saving".green().bold(),
-				delta.size_difference(),
-				ratio.dim()
-			);
-		} else {
-			let ratio = format!("(+{:.2} %)", delta.ratio());
-			println!(
-				"{} +{} {}",
-				"wasting".dark_yellow().bold(),
-				delta.size_difference(),
-				ratio.dim()
-			);
-		}
-
+		output.write_stats(stats);
 		println!();
 	}
 
-	if failed > 0 {
+	if stats.failed_files() > 0 {
 		ExitCode::FAILURE
 	} else {
 		ExitCode::SUCCESS
 	}
 }
 
-async fn run_input(input: impl AsRef<Path>, args: &Options) -> Result<Delta, Error> {
-	let input = input.as_ref();
-	if !input.exists() {
-		return Err(Error::InputNotFound(input.to_path_buf()));
+async fn run_input(input_file: impl AsRef<Path>, args: &Options, output: &mut Output) -> Result<Delta, Error> {
+	let input_file = input_file.as_ref();
+	if !input_file.exists() {
+		return Err(Error::InputNotFound(input_file.to_path_buf()));
 	}
 
-	if input.is_symlink() {
+	if input_file.is_symlink() {
 		// TODO: handle symlinks
-		return Err(Error::InputIsSymlink(input.to_path_buf()));
+		return Err(Error::InputIsSymlink(input_file.to_path_buf()));
 	}
 
-	let Some(tool) = ShrinkTool::for_file(input).await? else {
-		return Err(Error::InputFormatUnknown(input.to_path_buf()));
+	let Some(tool) = ShrinkTool::for_file(input_file).await? else {
+		return Err(Error::InputFormatUnknown(input_file.to_path_buf()));
 	};
 
-	let output = args.output.get(input, tool.extension(input));
-	if let Some(mut dir) = output.parent() {
+	let outptu_file = args.output.get(input_file, tool.extension(input_file));
+	if let Some(mut dir) = outptu_file.parent() {
 		if dir.as_os_str().is_empty() {
 			dir = AsRef::<Path>::as_ref(".");
 		}
@@ -173,29 +116,31 @@ async fn run_input(input: impl AsRef<Path>, args: &Options) -> Result<Delta, Err
 		}
 	}
 
-	let delta = run_tool(tool, input, &output).await?;
+	let delta = run_tool(tool, input_file, &outptu_file, output).await?;
 	if args.no_grow && !delta.is_smaller() {
-		trace!("conversion grew file, removing `{}`", output.display());
-		fs::remove_file(output).await?;
+		trace!("conversion grew file, removing `{}`", outptu_file.display());
+		fs::remove_file(outptu_file).await?;
 		return Ok(delta);
 	}
 
 	// TODO: rotate files when output is explicitly given, but it coincides with
 	// input
 	if args.output.should_replace() {
-		replace(input, output).await?;
+		replace(input_file, outptu_file).await?;
 	}
 
 	Ok(delta)
 }
 
-async fn run_tool(tool: ShrinkTool, input: impl AsRef<Path>, output: impl AsRef<Path>) -> Result<Delta, Error> {
-	let input = input.as_ref();
-	let output = output.as_ref();
-	if let Err(error) = execute_tool(tool, input, output).await {
-		if output.is_file() {
-			trace!("conversion failed, removing `{}`", output.display());
-			if let Err(error) = fs::remove_file(output).await {
+async fn run_tool(
+	tool: ShrinkTool, input_file: impl AsRef<Path>, output_file: impl AsRef<Path>, output: &mut Output,
+) -> Result<Delta, Error> {
+	let input_file = input_file.as_ref();
+	let output_file = output_file.as_ref();
+	if let Err(error) = execute_tool(tool, input_file, output_file, output).await {
+		if output_file.is_file() {
+			trace!("conversion failed, removing `{}`", output_file.display());
+			if let Err(error) = fs::remove_file(output_file).await {
 				error!("failed to remove output file: {}", error);
 			}
 		}
@@ -203,25 +148,30 @@ async fn run_tool(tool: ShrinkTool, input: impl AsRef<Path>, output: impl AsRef<
 		return Err(error);
 	}
 
-	let input_meta = fs::metadata(input).await?;
-	let output_meta = fs::metadata(output).await?;
+	let input_meta = fs::metadata(input_file).await?;
+	let output_meta = fs::metadata(output_file).await?;
 
 	let input_size = input_meta.len();
 	let output_size = output_meta.len();
-	filetime::set_file_mtime(output, filetime::FileTime::from_last_modification_time(&input_meta))?;
+	filetime::set_file_mtime(
+		output_file,
+		filetime::FileTime::from_last_modification_time(&input_meta),
+	)?;
 
 	Ok(Delta::new(input_size, output_size))
 }
 
-async fn execute_tool(tool: ShrinkTool, input: impl AsRef<Path>, output: impl AsRef<Path>) -> Result<(), Error> {
-	let input = input.as_ref();
-	let mut command = tool.command(input, output);
+async fn execute_tool(
+	tool: ShrinkTool, input_file: impl AsRef<Path>, output_file: impl AsRef<Path>, output: &mut Output,
+) -> Result<(), Error> {
+	let input_file = input_file.as_ref();
+	let mut command = tool.command(input_file, output_file);
 	command
 		.stdin(Stdio::null())
 		.stdout(Stdio::null())
 		.stderr(Stdio::piped());
 
-	let status = execute_command(command, input).await?;
+	let status = execute_command(command, input_file, output).await?;
 	if !status.success() {
 		return Err(Error::Conversion(tool.name(), status));
 	}
@@ -232,11 +182,9 @@ async fn execute_tool(tool: ShrinkTool, input: impl AsRef<Path>, output: impl As
 // TODO: add support for Windows as well
 
 #[cfg(target_family = "unix")]
-async fn execute_command(mut command: Command, input: &Path) -> Result<ExitStatus, Error> {
+async fn execute_command(mut command: Command, input: &Path, output: &mut Output) -> Result<ExitStatus, Error> {
 	use nix::sys::signal::{kill, Signal};
 	use nix::unistd::Pid;
-
-	const ANIMATION: &[&str] = &["⠋", "⠙", "⠸", "⠴", "⠦", "⠇"];
 
 	debug!("spawning {:?}", command);
 	let mut child = command.spawn()?;
@@ -245,45 +193,28 @@ async fn execute_command(mut command: Command, input: &Path) -> Result<ExitStatu
 	let mut err = BufReader::new(child.stderr.take().unwrap());
 	let mut err_buffer = Vec::new();
 
-	let mut out = stdout().lock();
 	let mut progress = 0;
 	let mut cancel = false;
-	let _ = write!(
-		out,
-		"   {} {} {}",
-		"Shrinking".cyan().bold(),
-		ANIMATION[progress],
-		input.display()
-	);
-	let _ = out.flush();
+	output.start_processing(input);
 
 	loop {
 		tokio::select! {
 			status = child.wait() => {
 				let status = status?;
 				debug!("child process {}", status);
-				let _ = write!(out, "{}{}", cursor::MoveToColumn(0), terminal::Clear(terminal::ClearType::CurrentLine));
-				let _ = out.flush();
+				output.end_processing();
 				return Ok(status);
 			},
 
 			_ = time::sleep(Duration::from_millis(100)) => {
-				progress = (progress + 1) % ANIMATION.len();
-				let _ = write!(out, "{}{}", cursor::MoveToColumn(0), terminal::Clear(terminal::ClearType::UntilNewLine));
-				let _ = if !cancel {
-					write!(out, "   {} {} {}", "Shrinking".cyan().bold(), ANIMATION[progress], input.display())
-				} else {
-					write!(out, "  {} {} {}", "Cancelling".red().bold(), ANIMATION[progress], input.display())
-				};
-				let _ = out.flush();
+				progress += 1;
+				output.update_processing(input, progress, cancel);
 			},
 
 			result = err.read_until(b'\n', &mut err_buffer) => {
 				let _ = result?;
-				let _ = write!(out, "{}{}", cursor::MoveToColumn(0), terminal::Clear(terminal::ClearType::UntilNewLine));
 				let err = String::from_utf8_lossy(err_buffer.as_ref());
-				let _ = write!(out, "             {}", err.dim());
-				let _ = out.flush();
+				output.write_processing(input, progress, cancel, err);
 				err_buffer.clear();
 			},
 
@@ -298,8 +229,7 @@ async fn execute_command(mut command: Command, input: &Path) -> Result<ExitStatu
 					if errno == nix::errno::Errno::ESRCH {
 						continue;
 					} else {
-						let _ = write!(out, "{}{}", cursor::MoveToColumn(0), terminal::Clear(terminal::ClearType::CurrentLine));
-						let _ = out.flush();
+						output.end_processing();
 						return Err(Error::from(errno));
 					}
 				}

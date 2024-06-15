@@ -14,7 +14,7 @@ pub struct Options {
 	pub inputs: Vec<PathBuf>,
 	/// Output options
 	#[command(flatten)]
-	pub output: Output,
+	pub output: OutputFiles,
 	/// Discard output file if it ended up being bigger than the input file
 	#[arg(short = 'G', long)]
 	pub no_grow: bool,
@@ -23,12 +23,12 @@ pub struct Options {
 	pub keep_going: bool,
 	/// Show statistics once all files are processed
 	#[arg(short, long)]
-	pub stats: bool
+	pub stats: bool,
 }
 
 #[derive(Debug, clap::Args)]
 #[group(required = false, multiple = false)]
-pub struct Output {
+pub struct OutputFiles {
 	/// Output file
 	#[arg(short = 'o', long = "output-file", value_name = "PATH")]
 	pub file: Option<PathBuf>,
@@ -37,15 +37,9 @@ pub struct Output {
 	pub dir: Option<PathBuf>,
 }
 
-impl Output {
+impl OutputFiles {
 	pub fn should_replace(&self) -> bool {
-		matches!(
-			self,
-			Output {
-				file: None,
-				dir: None
-			}
-		)
+		matches!(self, OutputFiles { file: None, dir: None })
 	}
 
 	pub fn get(&self, input: impl AsRef<Path>, extension: impl AsRef<OsStr>) -> PathBuf {
