@@ -10,6 +10,8 @@ pub enum Error {
 	InputIsSymlink(PathBuf),
 	#[error("output file `{}` already exists", .0.display())]
 	OutputExists(PathBuf),
+	#[error("input file `{}` could not be identified", .0.display())]
+	InputFormatUnknown(PathBuf),
 	#[error("tool `{}` not found", .0)]
 	ToolNotFound(&'static str),
 	#[error("{} invocation failed, {}", .0, .1)]
