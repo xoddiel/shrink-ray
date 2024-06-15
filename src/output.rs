@@ -109,7 +109,7 @@ impl Output {
 		let delta = stats.delta();
 		safe_write!(self.0, "Processed {}, ", delta.original_size());
 		if delta.is_smaller() {
-			let ratio = format!("(-{:.2} %)", delta.ratio());
+			let ratio = format!("(-{:.2} %)", 100.0 * delta.ratio());
 			safe_writeln!(
 				self.0,
 				"{} -{} {}",
@@ -118,7 +118,7 @@ impl Output {
 				ratio.dim()
 			);
 		} else {
-			let ratio = format!("(+{:.2} %)", delta.ratio());
+			let ratio = format!("(+{:.2} %)", 100.0 * delta.ratio());
 			safe_writeln!(
 				self.0,
 				"{} +{} {}",

@@ -4,19 +4,19 @@ use std::time::Duration;
 
 use clap::{CommandFactory, Parser};
 use error::Error;
+use identify::Identify;
 use options::Options;
+use output::Output;
 use shrink::{Shrink, ShrinkTool};
-use stats::Delta;
+use stats::{Delta, Statistics};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::{fs, signal, time};
 use tracing::{debug, error, trace};
 use tracing_subscriber::EnvFilter;
 
-use crate::output::Output;
-use crate::stats::Statistics;
-
 mod error;
+mod identify;
 mod options;
 mod output;
 mod shrink;
@@ -45,10 +45,18 @@ async fn main() -> ExitCode {
 	debug!("arguments: {:?}", options);
 	// TODO: bring back --dry-run
 
+	let identify = match Identify::new() {
+		Ok(x) => x,
+		Err(x) => {
+			eprintln!("{}", x);
+			return ExitCode::FAILURE;
+		}
+	};
+
 	let mut output = Output::new();
 	let mut stats = Statistics::default();
 	for input in &options.inputs {
-		match run_input(input, &options, &mut output).await {
+		match run_input(input, &options, &mut output, &identify).await {
 			Ok(delta) if delta.is_smaller() => {
 				output.write_shrink(input, delta);
 				stats.shrink(delta);
@@ -89,7 +97,9 @@ async fn main() -> ExitCode {
 	}
 }
 
-async fn run_input(input_file: impl AsRef<Path>, args: &Options, output: &mut Output) -> Result<Delta, Error> {
+async fn run_input(
+	input_file: impl AsRef<Path>, args: &Options, output: &mut Output, identify: &Identify,
+) -> Result<Delta, Error> {
 	let input_file = input_file.as_ref();
 	if !input_file.exists() {
 		return Err(Error::InputNotFound(input_file.to_path_buf()));
@@ -100,12 +110,16 @@ async fn run_input(input_file: impl AsRef<Path>, args: &Options, output: &mut Ou
 		return Err(Error::InputIsSymlink(input_file.to_path_buf()));
 	}
 
-	let Some(tool) = ShrinkTool::for_file(input_file).await? else {
+	let Some(mime) = identify.file(input_file).await? else {
 		return Err(Error::InputFormatUnknown(input_file.to_path_buf()));
 	};
 
-	let outptu_file = args.output.get(input_file, tool.extension(input_file));
-	if let Some(mut dir) = outptu_file.parent() {
+	let Some(tool) = ShrinkTool::for_mime(mime)? else {
+		return Err(Error::InputFormatUnknown(input_file.to_path_buf()));
+	};
+
+	let output_file = args.output.get(input_file, tool.extension(input_file));
+	if let Some(mut dir) = output_file.parent() {
 		if dir.as_os_str().is_empty() {
 			dir = AsRef::<Path>::as_ref(".");
 		}
@@ -116,17 +130,17 @@ async fn run_input(input_file: impl AsRef<Path>, args: &Options, output: &mut Ou
 		}
 	}
 
-	let delta = run_tool(tool, input_file, &outptu_file, output).await?;
+	let delta = run_tool(tool, input_file, &output_file, output).await?;
 	if args.no_grow && !delta.is_smaller() {
-		trace!("conversion grew file, removing `{}`", outptu_file.display());
-		fs::remove_file(outptu_file).await?;
+		trace!("conversion grew file, removing `{}`", output_file.display());
+		fs::remove_file(output_file).await?;
 		return Ok(delta);
 	}
 
 	// TODO: rotate files when output is explicitly given, but it coincides with
 	// input
 	if args.output.should_replace() {
-		replace(input_file, outptu_file).await?;
+		replace(input_file, output_file).await?;
 	}
 
 	Ok(delta)
