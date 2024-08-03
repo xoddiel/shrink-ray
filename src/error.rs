@@ -16,6 +16,8 @@ pub enum Error {
 	ToolNotFound(&'static str),
 	#[error("{} invocation failed, {}", .0, .1)]
 	Conversion(&'static str, ExitStatus),
+	#[error("cancelled")]
+	Cancelled,
 	#[error("{}", .0)]
 	Magic(String),
 	#[error(transparent)]

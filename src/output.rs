@@ -88,6 +88,10 @@ impl Output {
 		);
 	}
 
+	pub fn write_cancel(&mut self, file: impl AsRef<Path>) {
+		safe_writeln!(self.0, "   {} {}", "Cancelled".red().bold(), file.as_ref().display());
+	}
+
 	pub fn write_stats(&mut self, stats: Statistics) {
 		safe_write!(
 			self.0,
@@ -163,20 +167,19 @@ impl Output {
 	}
 
 	fn write_shrinking(&mut self, file: impl AsRef<Path>, progress: usize) {
-		safe_write!(
-			self.0,
-			"   {} {} {}",
-			"Shrinking".cyan().bold(),
-			Self::ANIMATION[progress % Self::ANIMATION.len()],
-			file.as_ref().display()
-		);
+		safe_write!(self.0, "   {} ", "Shrinking".cyan().bold());
+		self.write_processing_file(file, progress)
 	}
 
 	fn write_cancelling(&mut self, file: impl AsRef<Path>, progress: usize) {
+		safe_write!(self.0, "  {} ", "Cancelling".red().bold());
+		self.write_processing_file(file, progress)
+	}
+
+	fn write_processing_file(&mut self, file: impl AsRef<Path>, progress: usize) {
 		safe_write!(
 			self.0,
-			"  {} {} {}",
-			"Cancelling".red().bold(),
+			"{} {}",
 			Self::ANIMATION[progress % Self::ANIMATION.len()],
 			file.as_ref().display()
 		);

@@ -11,6 +11,7 @@ use shrink::{Shrink, ShrinkTool};
 use stats::{Delta, Statistics};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
+use tokio::time::interval;
 use tokio::{fs, signal, time};
 use tracing::{debug, error, trace};
 use tracing_subscriber::EnvFilter;
@@ -53,6 +54,7 @@ async fn main() -> ExitCode {
 		}
 	};
 
+	let mut cancel = false;
 	let mut output = Output::new();
 	let mut stats = Statistics::default();
 	for input in &options.inputs {
@@ -77,6 +79,11 @@ async fn main() -> ExitCode {
 					break;
 				}
 			}
+			Err(Error::Cancelled) => {
+				output.write_cancel(input);
+				cancel = true;
+				break;
+			}
 			Err(x) => {
 				eprintln!("{}", x);
 				return ExitCode::FAILURE;
@@ -92,6 +99,9 @@ async fn main() -> ExitCode {
 
 	if stats.failed_files() > 0 {
 		ExitCode::FAILURE
+	} else if cancel {
+		// this will stop tools like `xargs`
+		ExitCode::from(u8::MAX)
 	} else {
 		ExitCode::SUCCESS
 	}
@@ -153,7 +163,11 @@ async fn run_tool(
 	let output_file = output_file.as_ref();
 	if let Err(error) = execute_tool(tool, input_file, output_file, output).await {
 		if output_file.is_file() {
-			trace!("conversion failed, removing `{}`", output_file.display());
+			if matches!(error, Error::Cancelled) {
+				trace!("conversion cancelled, removing `{}`", output_file.display());
+			} else {
+				trace!("conversion failed, removing `{}`", output_file.display());
+			}
 			if let Err(error) = fs::remove_file(output_file).await {
 				error!("failed to remove output file: {}", error);
 			}
@@ -182,7 +196,7 @@ async fn execute_tool(
 	let mut command = tool.command(input_file, output_file);
 	command
 		.stdin(Stdio::null())
-		.stdout(Stdio::null())
+		.stdout(Stdio::piped())
 		.stderr(Stdio::piped());
 
 	let status = execute_command(command, input_file, output).await?;
@@ -204,6 +218,9 @@ async fn execute_command(mut command: Command, input: &Path, output: &mut Output
 	let mut child = command.spawn()?;
 	debug!("spawned {:?}", child);
 
+	let mut out = BufReader::new(child.stdout.take().unwrap());
+	let mut out_buffer = Vec::new();
+
 	let mut err = BufReader::new(child.stderr.take().unwrap());
 	let mut err_buffer = Vec::new();
 
@@ -211,16 +228,23 @@ async fn execute_command(mut command: Command, input: &Path, output: &mut Output
 	let mut cancel = false;
 	output.start_processing(input);
 
+	let mut interval = interval(Duration::from_millis(100));
+	interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+
 	loop {
 		tokio::select! {
 			status = child.wait() => {
 				let status = status?;
 				debug!("child process {}", status);
 				output.end_processing();
+				if cancel {
+					return Err(Error::Cancelled)
+				}
+
 				return Ok(status);
 			},
 
-			_ = time::sleep(Duration::from_millis(100)) => {
+			_ = interval.tick() => {
 				progress += 1;
 				output.update_processing(input, progress, cancel);
 			},
@@ -230,6 +254,13 @@ async fn execute_command(mut command: Command, input: &Path, output: &mut Output
 				let err = String::from_utf8_lossy(err_buffer.as_ref());
 				output.write_processing(input, progress, cancel, err);
 				err_buffer.clear();
+			},
+
+			result = out.read_until(b'\n', &mut out_buffer) => {
+				let _ = result?;
+				let out = String::from_utf8_lossy(out_buffer.as_ref());
+				output.write_processing(input, progress, cancel, out);
+				out_buffer.clear();
 			},
 
 			_ = signal::ctrl_c() => {
