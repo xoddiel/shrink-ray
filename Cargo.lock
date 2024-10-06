@@ -311,9 +311,9 @@ checksum = "90ed8c1e510134f979dbc4f070f87d4313098b704861a105fe34231c70a3901c"
 
 [[package]]
 name = "magic"
-version = "0.16.2"
+version = "0.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a200ae03df8c3dce7a963f6eeaac8feb41bf9001cb7e5ab22e3205aec2f0373d"
+checksum = "194f83cc8beddb459b4c961e6aa8e667fc477a21c14d1afaa3c0e017be05d758"
 dependencies = [
  "bitflags 2.5.0",
  "libc",

@@ -14,7 +14,7 @@ pub struct Options {
 	pub inputs: Vec<PathBuf>,
 	/// Output options
 	#[command(flatten)]
-	pub output: OutputFiles,
+	pub output: OutputOptions,
 	/// Discard output file if it ended up being bigger than the input file
 	#[arg(short = 'G', long)]
 	pub no_grow: bool,
@@ -26,9 +26,9 @@ pub struct Options {
 	pub stats: bool,
 }
 
-#[derive(Debug, clap::Args)]
+#[derive(Clone, Debug, clap::Args)]
 #[group(required = false, multiple = false)]
-pub struct OutputFiles {
+pub struct OutputOptions {
 	/// Output file
 	#[arg(short = 'o', long = "output-file", value_name = "PATH")]
 	pub file: Option<PathBuf>,
@@ -37,22 +37,22 @@ pub struct OutputFiles {
 	pub dir: Option<PathBuf>,
 }
 
-impl OutputFiles {
+impl OutputOptions {
 	pub fn should_replace(&self) -> bool {
-		matches!(self, OutputFiles { file: None, dir: None })
+		matches!(self, OutputOptions { file: None, dir: None })
 	}
 
-	pub fn get(&self, input: impl AsRef<Path>, extension: impl AsRef<OsStr>) -> PathBuf {
+	pub fn get(&self, input: impl AsRef<Path>, suffix: impl AsRef<OsStr>) -> PathBuf {
 		if let Some(file) = &self.file {
 			return file.clone();
 		}
 
 		if let Some(dir) = &self.dir {
-			return dir.join(input.as_ref().file_name().unwrap()).with_extension(extension);
+			return dir.join(input.as_ref().file_name().unwrap()).with_extension(suffix);
 		}
 
 		trace!("no output file given; choosing random temporary file");
-		let name = temp::file(&input, Some(extension.as_ref()));
+		let name = temp::file(&input, Some(suffix.as_ref()));
 		debug!("chose a temporary output file `{}`", name.display());
 		name
 	}

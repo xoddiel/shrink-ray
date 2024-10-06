@@ -1,28 +1,24 @@
 use std::path::Path;
-use std::process::{ExitCode, ExitStatus, Stdio};
-use std::time::Duration;
+use std::process::ExitCode;
 
 use clap::{CommandFactory, Parser};
+use context::Context;
 use error::Error;
-use identify::Identify;
 use options::Options;
-use output::Output;
-use shrink::{Shrink, ShrinkTool};
+use terminal::Terminal;
 use stats::{Delta, Statistics};
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
-use tokio::time::interval;
-use tokio::{fs, signal, time};
-use tracing::{debug, error, trace};
+use tokio::fs;
+use tracing::{debug, trace, warn};
 use tracing_subscriber::EnvFilter;
 
 mod error;
-mod identify;
 mod options;
-mod output;
-mod shrink;
+mod terminal;
 mod stats;
 mod temp;
+mod image;
+mod video;
+mod context;
 
 #[macro_use]
 extern crate thiserror;
@@ -44,9 +40,9 @@ async fn main() -> ExitCode {
 	}
 
 	debug!("arguments: {:?}", options);
-	// TODO: bring back --dry-run
 
-	let identify = match Identify::new() {
+	let terminal = Terminal::new();
+	let mut context = match Context::new(terminal, options.output.clone()).await {
 		Ok(x) => x,
 		Err(x) => {
 			eprintln!("{}", x);
@@ -55,24 +51,23 @@ async fn main() -> ExitCode {
 	};
 
 	let mut cancel = false;
-	let mut output = Output::new();
 	let mut stats = Statistics::default();
 	for input in &options.inputs {
-		match run_input(input, &options, &mut output, &identify).await {
+		match run_input(input, &options, &mut context).await {
 			Ok(delta) if delta.is_smaller() => {
-				output.write_shrink(input, delta);
+				context.terminal.write_shrink(input, delta);
 				stats.shrink(delta);
 			}
 			Ok(delta) => {
-				output.write_grow(input, delta);
+				context.terminal.write_grow(input, delta);
 				stats.grow(delta);
 			}
 			Err(Error::InputFormatUnknown(_)) => {
-				output.write_skip(input, "unknown file format");
+				context.terminal.write_skip(input, "unknown file format");
 				stats.skip();
 			}
-			Err(Error::Conversion(_, status)) => {
-				output.write_fail(input, status);
+			Err(Error::Invocation(_, status)) => {
+				context.terminal.write_fail(input, status);
 				stats.fail();
 
 				if !options.keep_going {
@@ -80,7 +75,7 @@ async fn main() -> ExitCode {
 				}
 			}
 			Err(Error::Cancelled) => {
-				output.write_cancel(input);
+				context.terminal.write_cancel(input);
 				cancel = true;
 				break;
 			}
@@ -93,7 +88,7 @@ async fn main() -> ExitCode {
 
 	if options.stats {
 		println!();
-		output.write_stats(stats);
+		context.terminal.write_stats(stats);
 		println!();
 	}
 
@@ -108,7 +103,7 @@ async fn main() -> ExitCode {
 }
 
 async fn run_input(
-	input_file: impl AsRef<Path>, args: &Options, output: &mut Output, identify: &Identify,
+	input_file: impl AsRef<Path>, args: &Options, context: &mut Context,
 ) -> Result<Delta, Error> {
 	let input_file = input_file.as_ref();
 	if !input_file.exists() {
@@ -120,27 +115,34 @@ async fn run_input(
 		return Err(Error::InputIsSymlink(input_file.to_path_buf()));
 	}
 
-	let Some(mime) = identify.file(input_file).await? else {
+	let Some(mime) = context.identify_file(input_file).await? else {
 		return Err(Error::InputFormatUnknown(input_file.to_path_buf()));
 	};
 
-	let Some(tool) = ShrinkTool::for_mime(mime)? else {
+	let output_file = if mime == "image/gif" {
+		// TODO: check if GIF is single- or multi-frame
+		warn!("GIF files are currently not supported");
+		return Err(Error::InputFormatUnknown(input_file.to_path_buf()));
+	} else if mime.starts_with("image/") {
+		image::convert(context, input_file).await?
+	} else if mime.starts_with("video/") {
+		video::convert(context, input_file).await?
+	} else {
+		warn!("unsupported file format: {}", mime);
 		return Err(Error::InputFormatUnknown(input_file.to_path_buf()));
 	};
 
-	let output_file = args.output.get(input_file, tool.extension(input_file));
-	if let Some(mut dir) = output_file.parent() {
-		if dir.as_os_str().is_empty() {
-			dir = AsRef::<Path>::as_ref(".");
-		}
+	let input_meta = fs::metadata(input_file).await?;
+	let output_meta = fs::metadata(&output_file).await?;
 
-		if !dir.is_dir() {
-			trace!("creating output directory `{}`", dir.display());
-			fs::create_dir_all(dir).await?;
-		}
-	}
+	let input_size = input_meta.len();
+	let output_size = output_meta.len();
+	filetime::set_file_mtime(
+		&output_file,
+		filetime::FileTime::from_last_modification_time(&input_meta),
+	)?;
 
-	let delta = run_tool(tool, input_file, &output_file, output).await?;
+	let delta = Delta::new(input_size, output_size);
 	if args.no_grow && !delta.is_smaller() {
 		trace!("conversion grew file, removing `{}`", output_file.display());
 		fs::remove_file(output_file).await?;
@@ -154,133 +156,6 @@ async fn run_input(
 	}
 
 	Ok(delta)
-}
-
-async fn run_tool(
-	tool: ShrinkTool, input_file: impl AsRef<Path>, output_file: impl AsRef<Path>, output: &mut Output,
-) -> Result<Delta, Error> {
-	let input_file = input_file.as_ref();
-	let output_file = output_file.as_ref();
-	if let Err(error) = execute_tool(tool, input_file, output_file, output).await {
-		if output_file.is_file() {
-			if matches!(error, Error::Cancelled) {
-				trace!("conversion cancelled, removing `{}`", output_file.display());
-			} else {
-				trace!("conversion failed, removing `{}`", output_file.display());
-			}
-			if let Err(error) = fs::remove_file(output_file).await {
-				error!("failed to remove output file: {}", error);
-			}
-		}
-
-		return Err(error);
-	}
-
-	let input_meta = fs::metadata(input_file).await?;
-	let output_meta = fs::metadata(output_file).await?;
-
-	let input_size = input_meta.len();
-	let output_size = output_meta.len();
-	filetime::set_file_mtime(
-		output_file,
-		filetime::FileTime::from_last_modification_time(&input_meta),
-	)?;
-
-	Ok(Delta::new(input_size, output_size))
-}
-
-async fn execute_tool(
-	tool: ShrinkTool, input_file: impl AsRef<Path>, output_file: impl AsRef<Path>, output: &mut Output,
-) -> Result<(), Error> {
-	let input_file = input_file.as_ref();
-	let mut command = tool.command(input_file, output_file);
-	command
-		.stdin(Stdio::null())
-		.stdout(Stdio::piped())
-		.stderr(Stdio::piped());
-
-	let status = execute_command(command, input_file, output).await?;
-	if !status.success() {
-		return Err(Error::Conversion(tool.name(), status));
-	}
-
-	Ok(())
-}
-
-// TODO: add support for Windows as well
-
-#[cfg(target_family = "unix")]
-async fn execute_command(mut command: Command, input: &Path, output: &mut Output) -> Result<ExitStatus, Error> {
-	use nix::sys::signal::{kill, Signal};
-	use nix::unistd::Pid;
-
-	debug!("spawning {:?}", command);
-	let mut child = command.spawn()?;
-	debug!("spawned {:?}", child);
-
-	let mut out = BufReader::new(child.stdout.take().unwrap());
-	let mut out_buffer = Vec::new();
-
-	let mut err = BufReader::new(child.stderr.take().unwrap());
-	let mut err_buffer = Vec::new();
-
-	let mut progress = 0;
-	let mut cancel = false;
-	output.start_processing(input);
-
-	let mut interval = interval(Duration::from_millis(100));
-	interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
-
-	loop {
-		tokio::select! {
-			status = child.wait() => {
-				let status = status?;
-				debug!("child process {}", status);
-				output.end_processing();
-				if cancel {
-					return Err(Error::Cancelled)
-				}
-
-				return Ok(status);
-			},
-
-			_ = interval.tick() => {
-				progress += 1;
-				output.update_processing(input, progress, cancel);
-			},
-
-			result = err.read_until(b'\n', &mut err_buffer) => {
-				let _ = result?;
-				let err = String::from_utf8_lossy(err_buffer.as_ref());
-				output.write_processing(input, progress, cancel, err);
-				err_buffer.clear();
-			},
-
-			result = out.read_until(b'\n', &mut out_buffer) => {
-				let _ = result?;
-				let out = String::from_utf8_lossy(out_buffer.as_ref());
-				output.write_processing(input, progress, cancel, out);
-				out_buffer.clear();
-			},
-
-			_ = signal::ctrl_c() => {
-				trace!("forwarding SIGINT");
-				if let Some(id) = child.id() {
-					cancel = true;
-					let Err(errno) = kill(Pid::from_raw(id as i32), Signal::SIGINT) else {
-						continue;
-					};
-
-					if errno == nix::errno::Errno::ESRCH {
-						continue;
-					} else {
-						output.end_processing();
-						return Err(Error::from(errno));
-					}
-				}
-			}
-		}
-	}
 }
 
 async fn replace(input: impl AsRef<Path>, output: impl AsRef<Path>) -> Result<(), Error> {

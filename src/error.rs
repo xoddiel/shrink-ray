@@ -12,14 +12,16 @@ pub enum Error {
 	OutputExists(PathBuf),
 	#[error("input file `{}` could not be identified", .0.display())]
 	InputFormatUnknown(PathBuf),
-	#[error("tool `{}` not found", .0)]
-	ToolNotFound(&'static str),
+	#[error("binary `{}` not found", .0)]
+	BinaryNotFound(&'static str),
+	#[error("binary `{}` not found", .0.display())]
+	BinaryInEnvNotFound(PathBuf),
 	#[error("{} invocation failed, {}", .0, .1)]
-	Conversion(&'static str, ExitStatus),
+	Invocation(&'static str, ExitStatus),
 	#[error("cancelled")]
 	Cancelled,
-	#[error("{}", .0)]
-	Magic(String),
+	#[error(transparent)]
+	Magic(#[from] magic::MagicError),
 	#[error(transparent)]
 	Io(#[from] io::Error),
 	#[error(transparent)]
@@ -27,10 +29,4 @@ pub enum Error {
 	#[cfg(target_family = "unix")]
 	#[error(transparent)]
 	Nix(#[from] nix::errno::Errno),
-}
-
-impl Error {
-	pub(crate) fn from_magic(error: impl std::error::Error) -> Self {
-		Self::Magic(error.to_string())
-	}
 }

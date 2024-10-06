@@ -39,13 +39,13 @@ macro_rules! safe_flush {
 	}};
 }
 
-pub struct Output(StdoutLock<'static>);
+pub struct Terminal(StdoutLock<'static>);
 
-impl Output {
+impl Terminal {
 	const ANIMATION: &'static [&'static str] = &["⠋", "⠙", "⠸", "⠴", "⠦", "⠇"];
 
 	pub fn new() -> Self {
-		Output(stdout().lock())
+		Terminal(stdout().lock())
 	}
 
 	pub fn write_shrink(&mut self, file: impl AsRef<Path>, delta: Delta) {

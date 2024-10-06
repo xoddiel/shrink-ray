@@ -13,7 +13,7 @@ edition = "2021"
 clap = { version = "4.4.11", features = ["derive"] }
 crossterm = "0.27.0"
 filetime = "0.2.23"
-magic = "0.16.2"
+magic = "0.15.1"
 rand = "0.8.5"
 size = "0.4.1"
 thiserror = "1.0.61"
