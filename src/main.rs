@@ -2,6 +2,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use clap::{CommandFactory, Parser};
+use comment::Comment;
 use context::Context;
 use error::Error;
 use options::Options;
@@ -19,6 +20,7 @@ mod temp;
 mod image;
 mod video;
 mod context;
+mod comment;
 
 #[macro_use]
 extern crate thiserror;
@@ -64,6 +66,10 @@ async fn main() -> ExitCode {
 			}
 			Err(Error::InputFormatUnknown(_)) => {
 				context.terminal.write_skip(input, "unknown file format");
+				stats.skip();
+			}
+			Err(Error::AlreadyConverted(_)) => {
+				context.terminal.write_skip(input, "file already converted");
 				stats.skip();
 			}
 			Err(Error::Invocation(_, status)) => {
@@ -124,9 +130,29 @@ async fn run_input(
 		warn!("GIF files are currently not supported");
 		return Err(Error::InputFormatUnknown(input_file.to_path_buf()));
 	} else if mime.starts_with("image/") {
-		image::convert(context, input_file).await?
+		match image::get_comment(context, input_file).await {
+			Ok(Some(x)) => {
+				debug!("comment found: {}", x);
+				return Err(Error::AlreadyConverted(x))
+			},
+			Ok(None) => {},
+			Err(crate::Error::Comment(x)) => debug!("unable to parse comment: {}", x),
+			Err(x) => return Err(x)
+		};
+
+		image::convert(context, Comment::default(), input_file).await?
 	} else if mime.starts_with("video/") {
-		video::convert(context, input_file).await?
+		match video::get_comment(context, input_file).await {
+			Ok(Some(x)) => {
+				debug!("comment found: {}", x);
+				return Err(Error::AlreadyConverted(x))
+			},
+			Ok(None) => {},
+			Err(crate::Error::Comment(x)) => debug!("unable to parse comment: {}", x),
+			Err(x) => return Err(x)
+		};
+
+		video::convert(context, Comment::default(), input_file).await?
 	} else {
 		warn!("unsupported file format: {}", mime);
 		return Err(Error::InputFormatUnknown(input_file.to_path_buf()));

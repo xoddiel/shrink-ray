@@ -15,6 +15,7 @@ crossterm = "0.27.0"
 filetime = "0.2.23"
 magic = "0.15.1"
 rand = "0.8.5"
+semver = "1.0.23"
 size = "0.4.1"
 thiserror = "1.0.61"
 tokio = { version = "1.35.1", features = ["io-util", "rt-multi-thread", "macros", "process", "fs", "signal", "time"] }

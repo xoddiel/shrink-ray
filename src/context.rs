@@ -44,10 +44,6 @@ impl Context {
 		Ok(output)
 	}
 
-	pub fn get_comment(&self) -> String {
-		String::from(concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION")))
-	}
-
 	pub fn command(&mut self, name: &'static str) -> Result<Command, crate::Error> {
 		let path = match self.binaries.entry(name) {
 			Entry::Occupied(x) => x.into_mut().as_path(),

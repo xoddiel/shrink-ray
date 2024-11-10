@@ -1,10 +1,10 @@
 use std::path::{Path, PathBuf};
 use tokio::fs;
-use tracing::error;
+use tracing::{error, trace};
 
-use crate::context::Context;
+use crate::{comment::Comment, context::Context};
 
-pub async fn get_comment(context: &mut Context, path: impl AsRef<Path>) -> Result<Option<String>, crate::Error> {
+pub async fn get_comment(context: &mut Context, path: impl AsRef<Path>) -> Result<Option<Comment>, crate::Error> {
 	let path = path.as_ref();
     let mut gm = context.command("ffprobe")?;
 	gm
@@ -25,14 +25,15 @@ pub async fn get_comment(context: &mut Context, path: impl AsRef<Path>) -> Resul
 		return Ok(None)
 	};
 
-	Ok(Some(comment.into()))
+	let comment = comment.trim();
+	comment.parse().map(Some).map_err(crate::Error::from)
 }
 
-pub async fn convert(context: &mut Context, input: impl AsRef<Path>) -> Result<PathBuf, crate::Error> {
+pub async fn convert(context: &mut Context, comment: Comment, input: impl AsRef<Path>) -> Result<PathBuf, crate::Error> {
 	let input = input.as_ref();
 	let output = context.get_output_file(input, ".webm").await?;
 	let log_file = context.get_output_file(input, "").await?;
-	let metadata = format!("comment={}", context.get_comment());
+	let metadata = format!("comment={}", comment);
 
 	let mut ffmpeg = context.command("ffmpeg")?;
 	ffmpeg.args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
@@ -44,6 +45,7 @@ pub async fn convert(context: &mut Context, input: impl AsRef<Path>) -> Result<P
 	if let Err(x) = context.run(ffmpeg, input).await {
 		let log_file = full_log_file_name(log_file);
 		if log_file.exists() {
+			trace!("error raised; deleting pass log file `{}`...", log_file.display());
 			if let Err(x) = fs::remove_file(&log_file).await {
 				error!("failed to delete pass log file `{}`: {}", log_file.display(), x);
 			}
@@ -64,6 +66,7 @@ pub async fn convert(context: &mut Context, input: impl AsRef<Path>) -> Result<P
 
 	let result = context.run(ffmpeg, input).await;
 	let log_file = full_log_file_name(log_file);
+	trace!("deleting pass log file `{}`...", log_file.display());
 	if let Err(x) = fs::remove_file(&log_file).await {
 		error!("failed to delete pass log file `{}`: {}", log_file.display(), x);
 	}
@@ -72,6 +75,7 @@ pub async fn convert(context: &mut Context, input: impl AsRef<Path>) -> Result<P
 		Ok(_) => Ok(output),
 		Err(x) => {
 			if output.exists() {
+				trace!("error raised; deleting output file `{}`...", output.display());
 				if let Err(x) = fs::remove_file(&output).await {
 					error!("failed to delete output file `{}`: {}", output.display(), x);
 				}

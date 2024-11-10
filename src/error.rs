@@ -2,6 +2,8 @@ use std::io;
 use std::path::PathBuf;
 use std::process::ExitStatus;
 
+use crate::comment::Comment;
+
 #[derive(Debug, Error)]
 pub enum Error {
 	#[error("input file `{}` not found", .0.display())]
@@ -20,6 +22,10 @@ pub enum Error {
 	Invocation(&'static str, ExitStatus),
 	#[error("cancelled")]
 	Cancelled,
+	#[error("file has already been converted")]
+	AlreadyConverted(Comment),
+	#[error(transparent)]
+	Comment(#[from] crate::comment::CommentParseError),
 	#[error(transparent)]
 	Magic(#[from] magic::MagicError),
 	#[error(transparent)]

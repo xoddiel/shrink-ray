@@ -37,7 +37,7 @@
 
         devShells.default = craneLib.devShell {
           inputsFrom = [ shrink-ray ];
-          packages = with pkgs; [ rust-analyzer ];
+          packages = with pkgs; [ rust-analyzer graphicsmagick ffmpeg ];
         };
         formatter = pkgs.nixfmt-rfc-style;
       }
